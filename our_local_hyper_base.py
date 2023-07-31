@@ -164,7 +164,7 @@ def main():
             input_dim=X.shape[1],
             hidden_dim=32,
             output_dim=20,
-            use_bn=True)
+            use_bn=True,
         )
 
         # create a Client object with the subgraph data and the client model
