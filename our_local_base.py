@@ -146,6 +146,7 @@ def main():
             learning_rate=0.001
         )
         print("Client Accuracy: {:.2f}%".format(test_accuracy * 100))
+        client_accuracy.append(test_accuracy)
     avg_client_accuracy = sum(client_accuracy) / len(client_accuracy)
     print("Average Test Accuracy of All Clients: {:.2f}%".format(avg_client_accuracy * 100))
     # No need for model aggregation, as we are not using federated learning in this case
