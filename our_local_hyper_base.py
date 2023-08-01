@@ -28,33 +28,64 @@ def louvain_partition(graph_data):
 
     return partitioned_data
 
+# def find_subhypergraph_with_nodes(hypergraph, node_list):
+#     # Create a new hypergraph with the specified nodes
+#     subgraph_nodes = set(node_list)
+#     subgraph_edges = []
+
+#     for edge in hypergraph.e:
+#         # Include the edge in the subgraph if any of its nodes are in the node list
+#         if any(node in subgraph_nodes for node in edge):
+#             subgraph_edges.append(edge)
+    
+#     # Handle isolated nodes
+#     isolated_nodes = [node for node in subgraph_nodes if not any(node in edge for edge in subgraph_edges)]
+#     for node in isolated_nodes:
+#         # Connect isolated node to all other hyperedges
+#         subgraph_edges.append((node,))
+
+#     subgraph_hg = Hypergraph(len(subgraph_nodes), subgraph_edges)
+
+#     return subgraph_hg
+
 def find_subhypergraph_with_nodes(hypergraph, node_list):
     # Create a new hypergraph with the specified nodes
     subgraph_nodes = set(node_list)
-    subgraph_edges = []
+    subgraph_edges = set()
 
     for edge in hypergraph.e:
         # Include the edge in the subgraph if any of its nodes are in the node list
         if any(node in subgraph_nodes for node in edge):
-            subgraph_edges.append(edge)
-    
+            subgraph_edges.add(tuple(sorted(edge)))  # Sorting ensures uniqueness
+
     # Handle isolated nodes
-    isolated_nodes = [node for node in subgraph_nodes if not any(node in edge for edge in subgraph_edges)]
+    isolated_nodes = {node for node in subgraph_nodes if not any(node in edge for edge in subgraph_edges)}
     for node in isolated_nodes:
         # Connect isolated node to all other hyperedges
-        subgraph_edges.append((node,))
+        subgraph_edges.add((node,))
+        # subgraph_nodes.add(node)  # Do not include isolated nodes in subgraph_nodes to keep the count correct
 
-    subgraph_hg = Hypergraph(len(subgraph_nodes), subgraph_edges)
+    # The number of nodes in the subhypergraph should be equal to the number of unique nodes in the hyperedges
+    subgraph_nodes = set(node for edge in subgraph_edges for node in edge)
+
+    subgraph_hg = Hypergraph(len(subgraph_nodes), list(subgraph_edges))
 
     return subgraph_hg
 
 
 
+
+
 # Define a custom Client class to hold data and model for each client
 class Client:
-    def __init__(self, data, model):
+    def __init__(self, data, model, X, lbl, train_mask, val_mask, test_mask):
         self.data = data
         self.model = model
+        self.X = X
+        self.lbl = lbl
+        self.train_mask = train_mask
+        self.val_mask = val_mask
+        self.test_mask = test_mask
 
 # class MyGCN(torch.nn.Module):
 #     def __init__(self, input_dim, hidden_dim, output_dim):
@@ -77,43 +108,38 @@ def nodes_to_mask(node_indices, num_nodes):
 
 
 # Function to perform local training on each client
-def train_client_model(client_model, data, num_epochs, learning_rate):
-    # Extract the required data from the 'data' object
-    x, edge_index, edge_weight, y, train_mask, val_mask, test_mask = (
-        data.x, data.edge_index, data.edge_weight, data.y, data.train_mask,
-        data.val_mask, data.test_mask
-    )
+def train_client_model(client_model, X, lbl, train_mask, val_mask, test_mask, data, num_epochs, learning_rate):
 
     # Define optimizer and loss function
     optimizer = torch.optim.Adam(client_model.parameters(), lr=learning_rate, weight_decay=5e-4)
     criterion = torch.nn.CrossEntropyLoss()
 
+    best_state = None
+    best_val = 0
     for epoch in range(num_epochs):
         # Prepare data and labels for the client
         optimizer.zero_grad()
-        output = client_model(x, data)
-        loss = F.cross_entropy(output[train_mask], y[train_mask])
+        output = client_model(X[train_mask], data)
+        loss = F.cross_entropy(output[train_mask], lbl[train_mask])
         loss.backward()
         optimizer.step()
 
-        best_model = None
-        best_acc = 0
-        client_model.eval()
-        with torch.no_grad():
-            val_output = client_model(x, data)[val_mask]
-            val_pred = val_output.argmax(dim=1)
-            val_accuracy = (val_pred == y[val_mask]).sum().item() / len(y[val_mask])
-            if val_accuracy > best_acc:
-                best_acc = val_accuracy
-                best_model = deepcopy(client_model.state_dict())
-                torch.save(best_model,'local_hgnn.model')
-                print(f'epoch: {epoch}, loss: {loss.item():.5f}, val_acc: {val_accuracy}')
+        if epoch % 5 == 0:
+            with torch.no_grad():
+                val_output = client_model(X, data)[val_mask]
+                val_pred = val_output.argmax(dim=1)
+                val_accuracy = (val_pred == lbl[val_mask]).sum().item() / len(lbl[val_mask])
+                if val_accuracy > best_val:
+                    best_val = val_accuracy
+                    best_state = deepcopy(client_model.state_dict())
+                    torch.save(best_state,'local_hgnn.model')
+                    print(f'epoch: {epoch}, loss: {loss.item():.5f}, val_acc: {val_accuracy}')
 
     # Compute accuracy of the client model on the local test dataset
-    client_model.load_state_dict(best_model)
-    test_output = client_model(x, data)
+    client_model.load_state_dict(best_state)
+    test_output = client_model(X, data)
     test_pred = test_output[test_mask].argmax(dim=1)
-    test_accuracy = (test_pred == y[test_mask]).sum().item() / len(y[test_mask])
+    test_accuracy = (test_pred == lbl[test_mask]).sum().item() / len(lbl[test_mask])
 
     return test_accuracy
 
@@ -146,7 +172,7 @@ def main():
     #     edge_weight.append(weight)
     # edge_index = torch.tensor([node0, node1],dtype=int)
     # edge_weight = torch.tensor(edge_weight,dtype=float)
-    # train_mask, val_mask, test_mask = hdataset['train_mask'], hdataset['val_mask'], hdataset['test_mask']
+    train_mask, val_mask, test_mask = hdataset['train_mask'], hdataset['val_mask'], hdataset['test_mask']
 
     
 
@@ -158,18 +184,21 @@ def main():
     clients_data = []
     for client_data in data_partitions:
         client_graph_data = find_subhypergraph_with_nodes(HG, client_data)
+        print('=======================')
+        print(client_graph_data)
 
         # initialize the HGNN model for each client (the same model architecture)
         client_model = HGNN(
-            input_dim=X.shape[1],
-            hidden_dim=32,
-            output_dim=20,
+            in_channels=X.shape[1],
+            hid_channels=32,
+            num_classes=20,
             use_bn=True,
         )
 
         # create a Client object with the subgraph data and the client model
-        client = Client(data=client_graph_data, model=client_model)
-
+        client = Client(data=client_graph_data, X=X[torch.tensor(client_data)], lbl=lbl[torch.tensor(client_data)], train_mask=train_mask, val_mask=val_mask, test_mask=test_mask,model=client_model)
+        print('*********************')
+        print(client)
         # Append the Client object to the list of clients
         clients_data.append(client)
 
@@ -178,6 +207,11 @@ def main():
     for client in clients_data:
         test_accuracy = train_client_model(
             client_model=client.model,
+            X=client.X,
+            lbl=client.lbl,
+            train_mask=client.train_mask,
+            val_mask=client.val_mask,
+            test_mask=client.test_mask,
             data=client.data,
             num_epochs=200,
             learning_rate=0.01

@@ -93,11 +93,9 @@ def find_best_part(graph_data, data_partitions):
 
 # Define a custom Client class to hold data and model for each client
 class Client:
-    def __init__(self, data, model, num_samples):
+    def __init__(self, data, model):
         self.data = data
         self.model = model
-        self.num_samples = len(data.y)  # Number of data samples in the client
-
 
 # Function to convert a list of node indices to a boolean tensor
 def nodes_to_mask(node_indices, num_nodes):
@@ -145,27 +143,15 @@ def train_client_model(client_model, data, num_epochs, learning_rate):
         optimizer.step()
 
 # Function for model aggregation (e.g., Federated Averaging)
-def aggregate_models(server_model, clients_data):
+def aggregate_models(server_model, client_models):
     server_model_dict = server_model.state_dict()
-    total_samples = 0  # To keep track of the total number of data samples across clients
-
-    # Initialize the server_model_dict as zeros
-    for key in server_model_dict:
-        server_model_dict[key] = torch.zeros_like(server_model_dict[key])
-
-    # Aggregate the model parameters from all client models
-    for client in clients_data:
-        num_samples = client.num_samples  # Number of data samples in the client
-        total_samples += num_samples
-
-        client_model_dict = client.model.state_dict()
+    for client_model in client_models:
+        client_model_dict = client_model.state_dict()
         for key in server_model_dict:
-            server_model_dict[key] += client_model_dict[key] * num_samples
-
-    # Calculate the weighted average of the parameters
+            server_model_dict[key] += client_model_dict[key]
+    num_clients = len(client_models)
     for key in server_model_dict:
-        server_model_dict[key] /= total_samples
-
+        server_model_dict[key] /= num_clients
     server_model.load_state_dict(server_model_dict)
 
 # Main federated training function
@@ -181,7 +167,7 @@ def federated_train(server_model, clients_data, num_epochs, num_round, learning_
             )
 
         # Aggregate client models to update the server model
-        aggregate_models(server_model, [client for client in clients_data])
+        aggregate_models(server_model, [client.model for client in clients_data])
 
     return server_model
 
@@ -247,7 +233,7 @@ def main():
         )
 
         # create a Client object with the subgraph data and the client model
-        client = Client(data=client_graph_data, model=client_model, num_samples=client_graph_data.y.shape[0])
+        client = Client(data=client_graph_data, model=client_model)
 
         # Append the Client object to the list of clients
         clients_data.append(client)
@@ -261,7 +247,7 @@ def main():
         server_model=server_model,
         clients_data=clients_data,
         num_epochs=200,
-        num_round=30,
+        num_round=100,
         learning_rate=0.01
     )
 
