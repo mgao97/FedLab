@@ -72,7 +72,24 @@ def find_subhypergraph_with_nodes(hypergraph, node_list):
 
     return subgraph_hg
 
+def remap_masks(original_mask, client_nodes_indices):
+    """
+    Remaps the original mask to the client's local subgraph.
 
+    Args:
+        original_mask (torch.BoolTensor): The original mask (e.g., train_mask or test_mask) of the entire graph.
+        client_nodes_indices (list or torch.Tensor): List or tensor containing the indices of nodes in the client's local subgraph.
+
+    Returns:
+        torch.BoolTensor: The remapped mask corresponding to the client's local subgraph.
+    """
+    # Create a boolean mask with False for all nodes in the entire graph
+    remapped_mask = torch.zeros_like(original_mask, dtype=torch.bool)
+
+    # Set True for nodes that belong to the client's local subgraph
+    remapped_mask[client_nodes_indices] = True
+
+    return remapped_mask
 
 
 
@@ -175,6 +192,7 @@ def main():
     train_mask, val_mask, test_mask = hdataset['train_mask'], hdataset['val_mask'], hdataset['test_mask']
 
     
+    print(f'train_mask {train_mask}, shape of train_mask {train_mask.shape}')
 
     # Partition the graph data into subgraphs using the Louvain algorithm
     data_partitions = torch.load('best_partitions.pt')
@@ -189,16 +207,22 @@ def main():
 
         # initialize the HGNN model for each client (the same model architecture)
         client_model = HGNN(
-            in_channels=X.shape[1],
+            in_channels=torch.eye(client_graph_data.num_v).shape[1],
             hid_channels=32,
             num_classes=20,
             use_bn=True,
         )
 
-        # create a Client object with the subgraph data and the client model
-        client = Client(data=client_graph_data, X=X[torch.tensor(client_data)], lbl=lbl[torch.tensor(client_data)], train_mask=train_mask, val_mask=val_mask, test_mask=test_mask,model=client_model)
-        print('*********************')
-        print(client)
+        # Create a new 'Client' object with remapped masks
+        client = Client(
+            data=client_graph_data,
+            X=torch.eye(client_graph_data.num_v),  # Assuming X is the feature matrix for the client's local subgraph
+            lbl=lbl[torch.tensor(client_data)],  # Assuming lbl is the label tensor for the entire graph, and we use the train_mask
+            train_mask = remap_masks(train_mask, client_data),
+            val_mask = remap_masks(val_mask, client_data),
+            test_mask = remap_masks(test_mask, client_data),
+            model=client_model
+        )
         # Append the Client object to the list of clients
         clients_data.append(client)
 

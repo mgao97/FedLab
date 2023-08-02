@@ -9,7 +9,7 @@ from fedlab.core.server.manager import AsynchronousServerManager
 # from fedlab.utils.functional import partition_data
 # from fedlab.utils.dataset.sampling import Partitioner
 # from fedlab.utils.functional import batch_data
-
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -39,14 +39,16 @@ os.environ["NUMEXPR_MAX_THREADS"] = "8"  # Replace 64 with the desired number of
 
 
 class MyGCN(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout_prob=0.5):
         super(MyGCN, self).__init__()
         self.conv1 = GCNConv(input_dim, hidden_dim)
         self.conv2 = GCNConv(hidden_dim, output_dim)
+        self.dropout = nn.Dropout(dropout_prob)
 
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
         x = F.relu(self.conv1(x, edge_index))
+        x = self.dropout(x)
         x = self.conv2(x, edge_index)
         return F.log_softmax(x, dim=1)
 
@@ -69,16 +71,7 @@ def louvain_partition(graph_data):
 
     return partitioned_data
 
-# def find_best_part(graph_data, data_partitions):
-#         best_part = []
-#         for part in data_partitions:
-#             best_part.append(len(part))
-#         if best_part == [1767, 1303, 743, 1340, 1106, 1144]:
-#             torch.save(data_partitions, 'best_partitions.pt')
-#         else:
-#             data_partitions = louvain_partition(graph_data)
-#             find_best_part(graph_data, data_partitions)
-#         return data_partitions
+
 def find_best_part(graph_data, data_partitions):
     # Check if the current partitions contain exactly 20 classes of node labels
     num_classes_per_partition = [len(torch.unique(graph_data.y[nodes])) for nodes in data_partitions]
@@ -96,7 +89,7 @@ class Client:
     def __init__(self, data, model, num_samples):
         self.data = data
         self.model = model
-        self.num_samples = len(data.y)  # Number of data samples in the client
+        self.num_samples = num_samples  # Number of data samples in the client
 
 
 # Function to convert a list of node indices to a boolean tensor
@@ -105,44 +98,75 @@ def nodes_to_mask(node_indices, num_nodes):
     mask[node_indices] = True
     return mask
 
+def compute_class_weights(labels):
+    # labels: tensor containing the class labels (e.g., data.y in your case)
+
+    # Count the occurrences of each class label
+    class_counts = torch.bincount(labels)
+
+    # Compute the class weights as the reciprocal of class frequencies
+    total_samples = len(labels)
+    class_weights = total_samples / (len(class_counts) * class_counts)
+
+    # Normalize the class weights to sum up to 1
+    class_weights /= class_weights.sum()
+
+    return class_weights
+
+
 # Function to perform local training on each client
-# def train_client_model(client_model, data, num_epochs, learning_rate):
-#     # Extract the required data from the 'data' object
-#     x, edge_index, edge_weight, y, train_mask, val_mask, test_mask = (
-#         data.x, data.edge_index, data.edge_weight, data.y, data.train_mask,
-#         data.val_mask, data.test_mask
-#     )
-
-#     # Define optimizer and loss function
-#     optimizer = torch.optim.Adam(client_model.parameters(), lr=learning_rate)
-#     criterion = torch.nn.CrossEntropyLoss()
-
-#     for epoch in range(num_epochs):
-#         # Prepare data and labels for the client
-#         optimizer.zero_grad()
-#         output = client_model(data)
-#         print(output.shape, y.shape)
-#         loss = criterion(output[train_mask], y[train_mask])
-#         loss.backward()
-#         optimizer.step()
-def train_client_model(client_model, data, num_epochs, learning_rate):
+def train_client_model(client_model, data, num_epochs, learning_rate, dropout_prob=0.5):
     # Extract the required data from the 'data' object
-    x, edge_index, edge_weight, y, train_mask, val_mask, test_mask = (
-        data.x, data.edge_index, data.edge_weight, data.y, data.train_mask,
-        data.val_mask, data.test_mask
-    )
 
     # Define optimizer and loss function
     optimizer = torch.optim.Adam(client_model.parameters(), lr=learning_rate, weight_decay=5e-4)
-    criterion = torch.nn.CrossEntropyLoss()
+    # Define the loss function with class weights
+    class_weights = compute_class_weights(data.y)
+    if class_weights is not None:
+        criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
+    else:
+        criterion = torch.nn.CrossEntropyLoss()
+    
+
+    # Lists to store training loss and validation accuracy for each epoch
+    train_loss_list = []
+    best_val_acc = 0
+    best_model_state_dict = None
 
     for epoch in range(num_epochs):
+        client_model.train()
         # Prepare data and labels for the client
         optimizer.zero_grad()
         output = client_model(data)
-        loss = criterion(output[train_mask], y[train_mask])
+        loss = criterion(output[data.train_mask], data.y[data.train_mask])
         loss.backward()
         optimizer.step()
+
+        # calculate and print the training loss for this epoch
+        train_loss_list.append(loss.item())
+        
+
+        # calculate and print the validation accuracy for this epoch
+        val_accuracy = evaluate_model(client_model, data)
+        if val_accuracy > best_val_acc:
+            best_val_acc = val_accuracy
+            # Save the model's state dictionary when it achieves the best validation accuracy
+            best_model_state_dict = client_model.state_dict()
+            torch.save(best_model_state_dict, 'fed_gcn_base.model')
+            print(f"Epoch [{epoch+1}/{num_epochs}] Loss: {loss.item():.4f} Validation Accuracy: {val_accuracy:.2f}%")
+
+    # plot the training loss and validation accuracy
+    plt.figure(figsize=(5,5))
+    
+    plt.plot(range(1, num_epochs+1), train_loss_list, label='Client Fed GCN Model')
+    plt.xlabel("Epoch")
+    plt.ylabel("Training Loss")
+    plt.legend()
+
+    plt.tight_layout()
+    plt.savefig('client_fed_gcn_train_loss.png')
+    # plt.show()
+
 
 # Function for model aggregation (e.g., Federated Averaging)
 def aggregate_models(server_model, clients_data):
@@ -166,10 +190,19 @@ def aggregate_models(server_model, clients_data):
     for key in server_model_dict:
         server_model_dict[key] /= total_samples
 
-    server_model.load_state_dict(server_model_dict)
+    # server_model.load_state_dict(server_model_dict)
+
+    return server_model
 
 # Main federated training function
-def federated_train(server_model, clients_data, num_epochs, num_round, learning_rate):
+def federated_train(server_model, data, clients_data, num_epochs, num_round, learning_rate):
+    
+    # Lists to store training loss and validation accuracy for each epoch of the server model
+    server_train_loss_list = []
+    best_server_val_acc = 0.0
+    best_server_model_state_dict = None
+
+
     for epoch in range(num_round):
         for client in clients_data:
             # Train the client model on its data
@@ -177,23 +210,59 @@ def federated_train(server_model, clients_data, num_epochs, num_round, learning_
                 client_model=client.model,
                 data=client.data,  # Assuming the data is stored in client.data
                 num_epochs=num_epochs,
-                learning_rate=learning_rate
+                learning_rate=learning_rate,
+                
             )
 
         # Aggregate client models to update the server model
-        aggregate_models(server_model, [client for client in clients_data])
+        server_model = aggregate_models(server_model, clients_data)
+        
+
+        # Calculate and print the training loss for this epoch of the server model
+        server_train_loss = torch.nn.CrossEntropyLoss()(server_model(data)[data.train_mask], data.y[data.train_mask])
+        server_train_loss_list.append(server_train_loss.item())
+        
+
+        # Calculate and print the validation accuracy for this epoch of the server model
+        server_val_accuracy = evaluate_model(server_model, data)
+
+        if server_val_accuracy > best_server_val_acc:
+            best_server_val_acc = server_val_accuracy
+            # Save the model's state dictionary when it achieves the best validation accuracy
+            best_server_model_state_dict = deepcopy(server_model.state_dict())
+
+            print(f"Epoch [{epoch+1}/{num_round}] Server Training Loss: {server_train_loss.item():.4f} Server Validation Accuracy: {server_val_accuracy:.2f}%")
+        
+
+    # Plot the training loss and validation accuracy for the server model
+    plt.figure(figsize=(5, 5))
+    
+    plt.plot(range(1, num_round + 1), server_train_loss_list, label="Server Fed GCN Model")
+    plt.xlabel("Epoch")
+    plt.ylabel("Server Training Loss")
+    plt.legend()
+
+    plt.tight_layout()
+    plt.savefig('server_fed_gcn_train_loss.png')
+    # plt.show()
+
+    server_model.load_state_dict(best_server_model_state_dict)
 
     return server_model
 
 
-# Function for model evaluation on a test dataset
-def evaluate_model(model, data):
+# Function for model evaluation on a val/test dataset
+def evaluate_model(model, data, test=False):
     model.eval()
     with torch.no_grad():
-        x, edge_index, y = data.x, data.edge_index, data.y
         output = model(data)
         pred = output.argmax(dim=1)
-        accuracy = (pred[data.test_mask] == y[data.test_mask]).sum().item() / len(y[data.test_mask])
+        if test:
+            correct = pred[data.test_mask] == data.y[data.test_mask]
+        else:
+            correct = pred[data.val_mask] == data.y[data.val_mask]
+
+        accuracy = correct.sum().item() / len(correct)
     return accuracy
 
 # Main function to execute federated learning for GCN
@@ -202,6 +271,11 @@ def main():
     
     hdataset = Cooking200()
     X, lbl = torch.eye(hdataset["num_vertices"]), hdataset["labels"]
+
+    unique_values, counts = torch.unique(lbl, return_counts=True)
+    print("Unique Values:", unique_values)
+    print("Counts:", counts)
+
     HG = Hypergraph(hdataset['num_vertices'], hdataset['edge_list'])
     G = Graph.from_hypergraph_clique(HG, weighted=True)
     node0, node1, edge_weight = [], [], []
@@ -216,10 +290,7 @@ def main():
     graph_data = Data(x=X, edge_index= edge_index, edge_wight=edge_weight, y=lbl, train_mask=train_mask, val_mask=val_mask, test_mask=test_mask)
     print(lbl, lbl.shape, torch.unique(lbl))
     print(f'graph_data {graph_data}')
-
-    # Partition the graph data into subgraphs and assign them to clients using FedLab's functionalities
-    # Assume you have a list of data samples and labels (data_list and label_list)
-    
+    class_weights = compute_class_weights(lbl)
     # data_partitions = louvain_partition(graph_data)
 
     # data_partitions = find_best_part(graph_data, data_partitions)
@@ -252,6 +323,7 @@ def main():
         # Append the Client object to the list of clients
         clients_data.append(client)
     
+    
     # initialize the server model
     server_model = MyGCN(input_dim=graph_data.x.shape[1], hidden_dim=32, output_dim=len(torch.unique(graph_data.y)))  # Replace with your GCN model initialization
     
@@ -259,15 +331,15 @@ def main():
     # Start federated training
     global_model = federated_train(
         server_model=server_model,
+        data = graph_data,
         clients_data=clients_data,
-        num_epochs=200,
+        num_epochs=100,
         num_round=30,
         learning_rate=0.01
     )
-
-    # Use the trained global model for predictions or further evaluations
+    
     # Evaluate the trained global model on the test dataset
-    test_accuracy = evaluate_model(global_model, graph_data)
+    test_accuracy = evaluate_model(global_model, graph_data, test=True)
     print("Test Accuracy: {:.2f}%".format(test_accuracy * 100))
 
 
